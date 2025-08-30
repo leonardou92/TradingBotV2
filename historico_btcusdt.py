@@ -17,19 +17,15 @@ import os
 import time
 from datetime import datetime
 import threading
-from sklearn.model_selection import cross_val_score, GridSearchCV
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
 load_dotenv()
 
-# --- Descarga y entrenamiento automático con históricos largos ---
 def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limit=2000, chunk=500, log_path='log_operaciones_historico.json'):
     """
     Descarga históricos extensos, detecta patrones, simula entradas y entrena el modelo ML y Gemini AI.
     """
-    import pandas as pd
-    import time
     exchange = ccxt.binance()
     all_ohlcv = []
     since = None
@@ -68,7 +64,8 @@ def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limi
     with open(log_path, 'w') as f:
         json.dump(log_ops, f, indent=2)
     print(f"Histórico de operaciones simulado guardado en {log_path} ({len(log_ops)} operaciones)")
-    # Entrenamiento ML local (puedes expandir aquí)
+    # Entrenamiento ML local
+    entrenar_modelo_rf(df)
     # Entrenamiento Gemini AI
     entrenar_con_gemini(log_path)
 import requests
@@ -186,30 +183,6 @@ try:
 except ImportError:
     PSARIndicator = None
     print("Advertencia: No se pudo importar PSARIndicator de la librería 'ta'. El indicador PSAR no estará disponible.")
-
-# --- Telegram ---
-try:
-    from telegram import Bot
-except ImportError:
-    Bot = None
-    print("Advertencia: No se pudo importar 'telegram'. Instala python-telegram-bot para notificaciones.")
-try:
-    from telegram_config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-except Exception:
-    TELEGRAM_BOT_TOKEN = None
-    TELEGRAM_CHAT_ID = None
-    print("Configura tu token y chat_id en telegram_config.py")
-
-def enviar_telegram_mensaje(mensaje):
-    if Bot is None or TELEGRAM_BOT_TOKEN is None or TELEGRAM_CHAT_ID is None:
-        print("[TELEGRAM] No configurado correctamente. Mensaje:", mensaje)
-        return
-    try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=mensaje)
-        print("[TELEGRAM] Notificación enviada.")
-    except Exception as e:
-        print(f"[TELEGRAM] Error al enviar mensaje: {e}")
 
 # Configuración
 symbol = 'ETH/USDT'
@@ -407,35 +380,42 @@ df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', '
 df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
 df = calcular_indicadores(df)
 
-# Entrenar modelo ML con los datos históricos
 
-# --- Mejorar features para ML ---
+# --- Entrenamiento del modelo ML encapsulado ---
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import GridSearchCV
+
 features = [
     'EMA_660', 'EMA_5', 'EMA_4', 'EMA_55', 'EMA_10', 'EMA_3', 'EMA_1',
     'RSI_14_EMA5', 'ATR_14', 'MACD', 'MACD_signal',
     'PSAR', 'SQZMOM_LB', 'BB_upper', 'BB_lower', 'KC_upper', 'KC_lower', 'close', 'volume'
 ]
-df_train = df.dropna()
-X = df_train[features].values
-y = df_train['target'].values
 
-# --- Validación cruzada y ajuste de hiperparámetros ---
-from sklearn.model_selection import cross_val_score, GridSearchCV
-best_score = 0
-clf = None
-if len(np.unique(y)) > 1:
-    param_grid = {
-        'n_estimators': [100, 200],
-        'max_depth': [3, 5, 8, None],
-        'min_samples_split': [2, 5, 10]
-    }
-    rf = RandomForestClassifier(random_state=42)
-    grid = GridSearchCV(rf, param_grid, cv=3, n_jobs=-1, scoring='accuracy')
-    grid.fit(X, y)
-    clf = grid.best_estimator_
-    best_score = grid.best_score_
-else:
+def entrenar_modelo_rf(df):
+    """
+    Entrena un modelo RandomForestClassifier y retorna el modelo y el score.
+    """
+    df_train = df.dropna()
+    X = df_train[features].values
+    y = df_train['target'].values
+    best_score = 0
     clf = None
+    if len(np.unique(y)) > 1:
+        param_grid = {
+            'n_estimators': [100, 200],
+            'max_depth': [3, 5, 8, None],
+            'min_samples_split': [2, 5, 10]
+        }
+        rf = RandomForestClassifier(random_state=42)
+        grid = GridSearchCV(rf, param_grid, cv=3, n_jobs=-1, scoring='accuracy')
+        grid.fit(X, y)
+        clf = grid.best_estimator_
+        best_score = grid.best_score_
+        print(f"[ML] Modelo entrenado. Mejor score: {best_score:.4f}")
+    else:
+        print("[ML] No hay suficientes clases para entrenar el modelo.")
+    return clf, best_score
+
 
 threading.Thread(target=actualizar_velas, daemon=True).start()
 
@@ -450,8 +430,21 @@ saldo = capital
 
 
 
-while True:
 
+# --- FLUJO PRINCIPAL DEL BOT ---
+def main():
+    global df, posicion_abierta, log_operaciones, saldo
+    print("Entrenando modelo ML...")
+    clf, best_score = entrenar_modelo_rf(df)
+    print("Modelo ML listo. Iniciando ciclo de trading...")
+    features = [
+        'EMA_660', 'EMA_5', 'EMA_4', 'EMA_55', 'EMA_10', 'EMA_3', 'EMA_1',
+        'RSI_14_EMA5', 'ATR_14', 'MACD', 'MACD_signal',
+        'PSAR', 'SQZMOM_LB', 'BB_upper', 'BB_lower', 'KC_upper', 'KC_lower', 'close', 'volume'
+    ]
+    abrir_operacion_snapshot = False
+    cerrar_operacion_snapshot = False
+    notificado_espera = False
     while True:
         try:
             # Recalcular indicadores para asegurar que todas las columnas existen
@@ -466,7 +459,6 @@ while True:
             ema10 = df['EMA_10'].iloc[-1]
             ema55 = df['EMA_55'].iloc[-1]
             print(f"EMA_1: {ema1:.2f}, EMA_3: {ema3:.2f}, EMA_10: {ema10:.2f}, EMA_55: {ema55:.2f}")
-            # Tolerancia mínima para considerar el patrón (por ejemplo, 0.01 USDT)
             tol = 0.01
             long_patron = (ema1 >= ema3 - tol) and (ema3 >= ema10 - tol) and (ema10 >= ema55 - tol) and (ema1 > ema3 and ema3 > ema10 and ema10 > ema55)
             short_patron = (ema1 <= ema3 + tol) and (ema3 <= ema10 + tol) and (ema10 <= ema55 + tol) and (ema1 < ema3 and ema3 < ema10 and ema10 < ema55)
@@ -476,12 +468,10 @@ while True:
             elif short_patron:
                 print("Señal SHORT detectada por 4EMA (patrón flexible)")
                 entrada_idx = len(df) - 1
-            # Advertencia si están muy cerca pero no cumplen el patrón exacto
             elif (abs(ema1-ema3)<tol or abs(ema3-ema10)<tol or abs(ema10-ema55)<tol):
                 print("EMAs muy cerca, pero no cumplen el patrón exacto.")
 
             plot_candles(ax1, df, entrada_idx=entrada_idx)
-            # Graficar todas las EMAs
             ax1.plot(df['datetime'], df['EMA_660'], label='EMA 660', color='blue', linewidth=1)
             ax1.plot(df['datetime'], df['EMA_5'], label='EMA 5', color='orange', linewidth=1)
             ax1.plot(df['datetime'], df['EMA_4'], label='EMA 4', color='magenta', linewidth=1)
@@ -489,8 +479,6 @@ while True:
             ax1.plot(df['datetime'], df['EMA_10'], label='EMA 10', color='green', linewidth=1, linestyle='--')
             ax1.plot(df['datetime'], df['EMA_3'], label='EMA 3', color='cyan', linewidth=1, linestyle='--')
             ax1.plot(df['datetime'], df['EMA_1'], label='EMA 1', color='black', linewidth=1, linestyle='--')
-            # --- Donchian Ribbon como overlay en ax1 ---
-            # Recalcular indicadores y asegurar columnas Donchian
             df = calcular_indicadores(df)
             for col in ['DONCHIAN_HIGH', 'DONCHIAN_LOW', 'DONCHIAN_RIBBON']:
                 if col not in df.columns:
@@ -503,7 +491,6 @@ while True:
                 ax1.axvspan(df['datetime'].iloc[i-1], df['datetime'].iloc[i], color=color, alpha=0.08)
             ax1.legend(loc='upper left', fontsize=8)
 
-            # --- Trend Meter y EFMUS en ax3 (subgráfico dedicado) ---
             ax3.clear()
             ax3.plot(df['datetime'], df['TREND_METER'], color='purple', label='Trend Meter', linewidth=1.5)
             ax3.plot(df['datetime'], df['EFMUS'], color='magenta', label='EFMUS', linewidth=1)
@@ -512,7 +499,6 @@ while True:
             ax3.legend(loc='upper left', fontsize=8)
             ax3.set_title('Trend Meter y EFMUS')
             ax3.grid(True, linestyle='--', alpha=0.3)
-            # Señales EFMUS
             for i in range(-20, 0):
                 if df['EFMUS_SIGNAL'].iloc[i] == 2:
                     ax3.axvline(df['datetime'].iloc[i], color='lime', linestyle=':', alpha=0.2)
@@ -523,14 +509,12 @@ while True:
             ax1.text(df['datetime'].iloc[-1], last_price*1.03, f'Saldo: {saldo:.2f} USDT',
                      color='blue', fontsize=12, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.7))
 
-            # Mostrar posición abierta y SL/TP en gráfica y consola
             if posicion_abierta is not None:
                 y_pos = posicion_abierta['precio_entrada']
                 color_pos = 'green' if posicion_abierta['tipo'] == 'long' else 'red'
                 ax1.axhline(y=y_pos, color=color_pos, linestyle='--', linewidth=1.5, alpha=0.7)
                 ax1.text(df['datetime'].iloc[-1], y_pos, f"{posicion_abierta['tipo'].upper()} @ {y_pos:.2f}",
                         color=color_pos, fontsize=10, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
-                # SL y TP automáticos (1%)
                 if posicion_abierta['tipo'] == 'long':
                     sl = y_pos * 0.99
                     tp = y_pos * 1.01
@@ -541,39 +525,28 @@ while True:
                 ax1.axhline(y=tp, color='green', linestyle=':', linewidth=1.2, alpha=0.8, label='TP')
                 ax1.text(df['datetime'].iloc[-1], sl, f'SL: {sl:.2f}', color='red', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
                 ax1.text(df['datetime'].iloc[-1], tp, f'TP: {tp:.2f}', color='green', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
-                # --- Indicadores visuales extra ---
-                # Trend Meter
                 ax1.text(df['datetime'].iloc[-1], df['close'].iloc[-1], f"TrendMeter: {df['TREND_METER'].iloc[-1]}", color='purple', fontsize=10, ha='left', va='top', bbox=dict(facecolor='white', alpha=0.5))
-                # Donchian Ribbon
                 ax1.plot(df['datetime'], df['DONCHIAN_HIGH'], color='orange', linestyle='--', linewidth=1, alpha=0.7, label='Donchian High')
                 ax1.plot(df['datetime'], df['DONCHIAN_LOW'], color='blue', linestyle='--', linewidth=1, alpha=0.7, label='Donchian Low')
-                # Ribbon color
                 for i in range(-20, 0):
                     color = 'lime' if df['DONCHIAN_RIBBON'].iloc[i] == 1 else ('red' if df['DONCHIAN_RIBBON'].iloc[i] == -1 else 'gray')
                     ax1.axvspan(df['datetime'].iloc[i-1], df['datetime'].iloc[i], color=color, alpha=0.08)
-                # EFMUS
                 ax1.plot(df['datetime'], df['EFMUS'], color='magenta', linestyle='-', linewidth=1, alpha=0.7, label='EFMUS')
-                # EFMUS señal
                 for i in range(-20, 0):
                     if df['EFMUS_SIGNAL'].iloc[i] == 2:
                         ax1.axvline(df['datetime'].iloc[i], color='lime', linestyle=':', alpha=0.2)
                     elif df['EFMUS_SIGNAL'].iloc[i] == -2:
                         ax1.axvline(df['datetime'].iloc[i], color='red', linestyle=':', alpha=0.2)
 
-
-            # Comprobación defensiva para SQZ_ON
             if 'SQZ_ON' not in df.columns:
                 print('Error: La columna SQZ_ON no está presente en el DataFrame. Recalculando indicadores...')
                 df = calcular_indicadores(df)
                 if 'SQZ_ON' not in df.columns:
                     raise KeyError('No se pudo calcular la columna SQZ_ON. Revisa el cálculo de indicadores.')
 
-            # Mostrar SL y TP en consola (solo si están definidos)
             if 'sl' in locals() and 'tp' in locals():
                 print(f"SL: {sl:.2f} | TP: {tp:.2f}")
 
-
-            # --- Predicción ML y filtro de estrategia ---
             ml_pred = None
             ml_text = ''
             if clf is not None:
@@ -585,12 +558,10 @@ while True:
 
             now = df['datetime'].iloc[-1]
             volatilidad = df['close'].rolling(window=10).std().iloc[-1]
-            # Apalancamiento siempre entre x5 y x10
             max_leverage = 20
             min_leverage = 10
             leverage = int(max(min_leverage, min(max_leverage, round(10 - min(volatilidad, 5)))))
 
-            # Lógica robusta de entrada: solo entrar si hay cruce de EMAs y confirmación de MACD y RSI
             ema_cross = (df['EMA_5'].iloc[-2] < df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] > df['EMA_660'].iloc[-1]) or \
                         (df['EMA_5'].iloc[-2] > df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] < df['EMA_660'].iloc[-1])
             macd_bull = df['MACD'].iloc[-1] > df['MACD_signal'].iloc[-1]
@@ -598,18 +569,14 @@ while True:
             rsi_bull = df['RSI_14_EMA5'].iloc[-1] < 30
             rsi_bear = df['RSI_14_EMA5'].iloc[-1] > 70
 
-
-            # --- Filtro Onda de Elliott ---
             onda_tipo, onda_idxs = detectar_onda_elliott(df)
             elliott_long = onda_tipo == 'alcista'
             elliott_short = onda_tipo == 'bajista'
 
-            # --- Estrategia combinada ML + indicadores + Elliott ---
             abrir_long = ema_cross and macd_bull and rsi_bull and ml_pred == 1 and elliott_long
             abrir_short = ema_cross and macd_bear and rsi_bear and ml_pred == 0 and elliott_short
 
             if posicion_abierta is None:
-                # --- SOLO abrir posición si hay patrón experto y registrar el patrón ---
                 tipo = None
                 patron_detectado = None
                 elliott_tipo, elliott_idxs = detectar_onda_elliott(df, lookback=30)
@@ -630,13 +597,11 @@ while True:
                         'patron_detectado': patron_detectado,
                         'prediccion': tipo
                     }
-                # Dibujar la onda de Elliott detectada
                 if onda_idxs is not None:
                     elliott_color = 'green' if onda_tipo == 'alcista' else 'red'
                     elliott_label = f"Onda Elliott: {onda_tipo.upper()}"
                     ax1.plot(df['datetime'].iloc[onda_idxs], df['close'].iloc[onda_idxs], marker='o', color=elliott_color, linestyle='-', linewidth=2, label=elliott_label)
                     ax1.text(df['datetime'].iloc[onda_idxs[-1]], df['close'].iloc[onda_idxs[-1]]*1.01, elliott_label, color=elliott_color, fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.2))
-                # --- Fin visualización de niveles ---
                 if abrir_long:
                     tipo = 'long'
                 elif abrir_short:
@@ -651,11 +616,18 @@ while True:
                         'patron_detectado': patron_detectado,
                         'prediccion': tipo
                     }
+                    # Notificación Telegram de entrada
+                    try:
+                        mensaje = f"🚦 ENTRADA: {patron_detectado}\nPrecio: {last_price:.2f} USDT\nFecha: {now}\nSaldo: {saldo:.2f} USDT"
+                        enviar_telegram_mensaje(mensaje)
+                    except Exception as e:
+                        print(f"[TELEGRAM] Error al notificar entrada: {e}")
+                    save_plot_snapshot(fig, filename_prefix="backtest_entrada")
+                    abrir_operacion_snapshot = True
+                    cerrar_operacion_snapshot = False
             else:
-                # Decisión IA: mantener o cerrar operación según predicción y patrón
                 mantener = decision_cierre_ia(df, posicion_abierta, ml_pred)
                 cerrar_ia = not mantener
-                # SL y TP
                 if posicion_abierta['tipo'] == 'long':
                     sl = posicion_abierta['precio_entrada'] * 0.99
                     tp = posicion_abierta['precio_entrada'] * 1.01
@@ -701,29 +673,43 @@ while True:
                     with open(log_path, 'w') as f:
                         json.dump(log_operaciones, f, indent=2)
                     posicion_abierta = None
+                    # Notificación Telegram de salida
+                    try:
+                        mensaje = (
+                            f"🏁 SALIDA: {operacion.get('tipo','')}\n"
+                            f"Entrada: {operacion.get('precio_entrada',0):.2f} USDT\n"
+                            f"Salida: {operacion.get('precio_salida',0):.2f} USDT\n"
+                            f"Resultado: {operacion.get('resultado_pct',0):.2f}%\n"
+                            f"Saldo entrada: {operacion.get('saldo_entrada',0):.2f} USDT\n"
+                            f"Saldo final: {operacion.get('saldo_final',0):.2f} USDT\n"
+                            f"Comisión: {operacion.get('comision_usdt',0):.4f} USDT\n"
+                            f"Motivo: {operacion.get('motivo_cierre','')}\n"
+                            f"Patrón: {operacion.get('patron_detectado','')}\n"
+                            f"Fecha entrada: {operacion.get('fecha_entrada','')}\n"
+                            f"Fecha salida: {operacion.get('fecha_salida','') if 'fecha_salida' in operacion else ''}"
+                        )
+                        enviar_telegram_mensaje(mensaje)
+                    except Exception as e:
+                        print(f"[TELEGRAM] Error al notificar salida: {e}")
+                    save_plot_snapshot(fig, filename_prefix="backtest_salida")
+                    cerrar_operacion_snapshot = True
+                    abrir_operacion_snapshot = False
 
-            # --- Estrategia experta: solo operar si hay patrón claro de Elliott o Fibonacci ---
-            entrada_idx = None
-            patron_experto = None
-            # Elliott
             tipo_elliott, pivotes_elliott = detectar_onda_elliott(df, lookback=30)
             if tipo_elliott is not None:
                 patron_experto = f"Elliott-{tipo_elliott}"
                 print(f"ESTRATEGIA: Señal experta Elliott detectada: {tipo_elliott.upper()}")
-                # Visualizar pivotes Elliott
                 color_elliott = 'green' if tipo_elliott == 'alcista' else 'red'
                 for idx in pivotes_elliott:
                     if idx in df.index:
                         ax1.scatter(df['datetime'].iloc[idx], df['close'].iloc[idx], color=color_elliott, s=80, marker='o', label='Elliott Pivot')
                 entrada_idx = len(df) - 1
-            # Fibonacci
             else:
                 fibo_tipo, fibo_levels, fibo_idxs = detectar_fibonacci_experto(df, lookback=50)
                 if fibo_tipo is not None:
                     patron_experto = f"Fibonacci-{fibo_tipo}"
                     print(f"ESTRATEGIA: Señal experta Fibonacci detectada: {fibo_tipo.upper()} en nivel clave")
                     color_fibo = 'blue' if fibo_tipo == 'long' else 'red'
-                    # Solo dibujar niveles de Fibonacci dentro del rango de precios recientes
                     min_price = df['low'].iloc[-60:].min()
                     max_price = df['high'].iloc[-60:].max()
                     for lvl in fibo_levels:
@@ -735,19 +721,11 @@ while True:
                                 ax1.scatter(df['datetime'].iloc[idx], df['close'].iloc[idx], color=color_fibo, s=80, marker='o', label='Fibo Pivot')
                     entrada_idx = len(df) - 1
 
-            # Solo operar si hay patrón experto
-            if entrada_idx is not None:
-                print(f"ENTRADA EXPERTA: Operando por patrón {patron_experto}")
-                # Aquí puedes agregar lógica para registrar el tipo de patrón en la operación/log
-
-
-            # Mostrar accuracy del modelo ML
             if best_score > 0:
                 acc_text = f"ML accuracy (val): {best_score*100:.2f}%"
                 print(acc_text)
                 ax1.text(df['datetime'].iloc[-1], last_price*1.07, acc_text, color='blue', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
 
-            # Señal combinada ML+Estrategia
             if ml_pred is not None:
                 if (abrir_long or abrir_short):
                     ax1.scatter(df['datetime'].iloc[-1], last_price, color='lime', s=120, marker='*', label='ML+Estrategia')
@@ -758,6 +736,12 @@ while True:
                 estado = "Esperando señal de entrada..."
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {estado}")
                 ax1.text(df['datetime'].iloc[-1], last_price*1.05, estado, color='gray', fontsize=11, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3, edgecolor='none'))
+                if not notificado_espera:
+                    try:
+                        enviar_telegram_mensaje("⏳ El bot está esperando una señal de entrada...")
+                        notificado_espera = True
+                    except Exception as e:
+                        print(f"[TELEGRAM] Error al notificar espera de entrada: {e}")
             else:
                 tipo = 'COMPRA (LONG)' if posicion_abierta['tipo'] == 'long' else 'VENTA (SHORT)'
                 indicadores = posicion_abierta['indicadores']
@@ -765,13 +749,13 @@ while True:
                 if posicion_abierta['tipo'] == 'long':
                     pnl = (last_price - posicion_abierta['precio_entrada']) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
                 else:
+                    notificado_espera = False  # Se resetea al abrir una posición
                     pnl = (posicion_abierta['precio_entrada'] - last_price) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
                 saldo_pos = f"Saldo actual: {saldo:.2f} USDT | PnL: {pnl:.2f}%"
                 estado = f"En operación: {tipo} | Entrada: {posicion_abierta['precio_entrada']:.2f} USDT | Apalancamiento: x{posicion_abierta['apalancamiento']}\nPatrón: {patron}\n{saldo_pos}"
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {estado}")
                 ax1.text(df['datetime'].iloc[-1], last_price*1.05, estado, color='black', fontsize=10, ha='left', va='bottom', bbox=dict(facecolor='yellow', alpha=0.3, edgecolor='none'))
 
-            # Limitar el eje Y al rango de precios recientes para evitar distorsión por overlays
             min_y = df['low'].iloc[-60:].min()
             max_y = df['high'].iloc[-60:].max()
             ax1.set_ylim(min_y * 0.995, max_y * 1.005)
@@ -785,48 +769,6 @@ while True:
             ax2.legend()
             ax2.grid()
 
-            # Guardar snapshot SOLO antes de abrir una operación y justo al cerrarla
-            if 'abrir_operacion_snapshot' not in locals():
-                abrir_operacion_snapshot = False
-            if 'cerrar_operacion_snapshot' not in locals():
-                cerrar_operacion_snapshot = False
-
-            # Antes de abrir operación
-            if posicion_abierta is None and entrada_idx is not None and not abrir_operacion_snapshot:
-                save_plot_snapshot(fig, filename_prefix="backtest_entrada")
-                abrir_operacion_snapshot = True
-                cerrar_operacion_snapshot = False
-                # --- Notificación Telegram de entrada ---
-                try:
-                    mensaje = f"🚦 ENTRADA: {patron_experto if 'patron_experto' in locals() else 'Patrón'}\nPrecio: {df['close'].iloc[-1]:.2f} USDT\nFecha: {df['datetime'].iloc[-1]}\nSaldo: {saldo:.2f} USDT"
-                    enviar_telegram_mensaje(mensaje)
-                except Exception as e:
-                    print(f"[TELEGRAM] Error al notificar entrada: {e}")
-
-            # Justo al cerrar operación
-            if posicion_abierta is None and len(log_operaciones) > 0 and not cerrar_operacion_snapshot:
-                save_plot_snapshot(fig, filename_prefix="backtest_salida")
-                cerrar_operacion_snapshot = True
-                abrir_operacion_snapshot = False
-                # --- Notificación Telegram de salida ---
-                try:
-                    ultima_op = log_operaciones[-1]
-                    mensaje = (
-                        f"🏁 SALIDA: {ultima_op.get('tipo','')}\n"
-                        f"Entrada: {ultima_op.get('precio_entrada',0):.2f} USDT\n"
-                        f"Salida: {ultima_op.get('precio_salida',0):.2f} USDT\n"
-                        f"Resultado: {ultima_op.get('resultado_pct',0):.2f}%\n"
-                        f"Saldo entrada: {ultima_op.get('saldo_entrada',0):.2f} USDT\n"
-                        f"Saldo final: {ultima_op.get('saldo_final',0):.2f} USDT\n"
-                        f"Comisión: {ultima_op.get('comision_usdt',0):.4f} USDT\n"
-                        f"Motivo: {ultima_op.get('motivo_cierre','')}\n"
-                        f"Patrón: {ultima_op.get('patron_detectado','')}\n"
-                        f"Fecha entrada: {ultima_op.get('fecha_entrada','')}\n"
-                        f"Fecha salida: {ultima_op.get('fecha_salida','') if 'fecha_salida' in ultima_op else ''}"
-                    )
-                    enviar_telegram_mensaje(mensaje)
-                except Exception as e:
-                    print(f"[TELEGRAM] Error al notificar salida: {e}")
             plt.pause(0.01)
             time.sleep(1)
         except KeyboardInterrupt:
@@ -835,17 +777,16 @@ while True:
 
 
 # Mostrar log de operaciones al finalizar y entrenar con Gemini
-if log_operaciones:
-    print("\nResumen de operaciones:")
-    for op in log_operaciones:
-        print(f"{op['fecha_entrada']} {op['tipo'].upper()} entrada: {op['precio_entrada']:.2f} salida: {op['precio_salida']:.2f} resultado: {op['resultado_pct']:.2f}% saldo entrada: {op['saldo_entrada']:.2f} saldo final: {op['saldo_final']:.2f} USDT comisión: {op['comision_usdt']:.4f} motivo: {op.get('motivo_cierre','')} patrón: {op.get('patron_detectado','')}")
-    # Entrenamiento con Gemini AI
-    entrenar_con_gemini(log_path)
+def mostrar_resumen_y_entrenar():
+    if log_operaciones:
+        print("\nResumen de operaciones:")
+        for op in log_operaciones:
+            print(f"{op['fecha_entrada']} {op['tipo'].upper()} entrada: {op['precio_entrada']:.2f} salida: {op['precio_salida']:.2f} resultado: {op['resultado_pct']:.2f}% saldo entrada: {op['saldo_entrada']:.2f} saldo final: {op['saldo_final']:.2f} USDT comisión: {op['comision_usdt']:.4f} motivo: {op.get('motivo_cierre','')} patrón: {op.get('patron_detectado','')}")
+        # Entrenamiento con Gemini AI
+        entrenar_con_gemini(log_path)
+    plt.show()
 
-plt.show()
 # --- Entrenamiento y predicción automática cada 30 minutos ---
-import threading
-
 def ciclo_entrenamiento_30min():
     while True:
         print("[CICLO] Descargando histórico, entrenando IA y aplicando estrategia...")
@@ -853,6 +794,16 @@ def ciclo_entrenamiento_30min():
         print("[CICLO] Esperando 30 minutos para el próximo entrenamiento...")
         time.sleep(1800)
 
-# Lanzar el ciclo en segundo plano
 threading.Thread(target=ciclo_entrenamiento_30min, daemon=True).start()
+
+# Enviar mensaje de bienvenida a Telegram al iniciar el bot
+if __name__ == "__main__":
+    print("Iniciando bot de trading...")
+    try:
+        enviar_telegram_mensaje("🚀🤖 ¡El bot de trading se ha iniciado correctamente! Listo para operar y aprender. ¡Vamos a por esos profits! 💰📈")
+    except Exception as e:
+        print(f"[TELEGRAM] Error al enviar mensaje de bienvenida: {e}")
+    print("Bot de trading inicializado. Ejecutando ciclo principal...")
+    main()
+    mostrar_resumen_y_entrenar()
 
