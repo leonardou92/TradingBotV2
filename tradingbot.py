@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # --- IMPORTS MODULARES ---
 from bot_utils.utils import fetch_ohlcv_safe, save_plot_snapshot
 from bot_utils.indicadores import calcular_indicadores
@@ -302,44 +303,6 @@ def calcular_indicadores(df):
     df['EMA_10'] = df['close'].ewm(span=10, adjust=False).mean()
     df['EMA_3'] = df['close'].ewm(span=3, adjust=False).mean()
     df['EMA_1'] = df['close']  # EMA de periodo 1 es igual al precio de cierre
-    return df
-    delta = df['EMA_5'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI_14_EMA5'] = 100 - (100 / (1 + rs))
-    df['H-L'] = df['high'] - df['low']
-    df['H-PC'] = abs(df['high'] - df['close'].shift(1))
-    df['L-PC'] = abs(df['low'] - df['close'].shift(1))
-    df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    df['ATR_14'] = df['TR'].rolling(window=14).mean()
-    ema12 = df['close'].ewm(span=12, adjust=False).mean()
-    ema26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = ema12 - ema26
-    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
-    # PSAR (Parabolic SAR)
-    if PSARIndicator is not None:
-        psar = PSARIndicator(df['high'], df['low'], df['close'], step=0.10, max_step=0.10)
-        df['PSAR'] = psar.psar()
-    else:
-        df['PSAR'] = np.nan
-    # Squeeze Momentum (LazyBear approximation)
-    # Bollinger Bands
-    bb_mid = df['close'].rolling(window=20).mean()
-    bb_std = df['close'].rolling(window=20).std()
-    df['BB_upper'] = bb_mid + 2 * bb_std
-    df['BB_lower'] = bb_mid - 2 * bb_std
-    # Keltner Channel
-    ema_kelt = df['close'].ewm(span=20, adjust=False).mean()
-    atr_kelt = df['TR'].rolling(window=20).mean()
-    df['KC_upper'] = ema_kelt + 1.5 * atr_kelt
-    df['KC_lower'] = ema_kelt - 1.5 * atr_kelt
-    # Squeeze On/Off
-    df['SQZ_ON'] = (df['BB_lower'] > df['KC_lower']) & (df['BB_upper'] < df['KC_upper'])
-    df['SQZ_OFF'] = (df['BB_lower'] < df['KC_lower']) & (df['BB_upper'] > df['KC_upper'])
-    # Momentum (diferencia de cierre)
-    df['SQZMOM_LB'] = df['close'] - df['close'].rolling(window=20).mean()
     return df
 
 # Inicializar exchange y cargar histórico una sola vez
@@ -784,18 +747,21 @@ def main():
                     posicion_abierta = None
                     # Notificación Telegram de salida
                     try:
+                        resultado_pct = operacion.get('resultado_pct', 0)
+                        despedida = "me partieron 😭" if resultado_pct < 0 else "vamos pa dubai bro 😎 jajajaj"
                         mensaje = (
                             f"🏁 SALIDA: {operacion.get('tipo','')}\n"
                             f"Entrada: {operacion.get('precio_entrada',0):.2f} USDT\n"
                             f"Salida: {operacion.get('precio_salida',0):.2f} USDT\n"
-                            f"Resultado: {operacion.get('resultado_pct',0):.2f}%\n"
+                            f"Resultado: {resultado_pct:.2f}%\n"
                             f"Saldo entrada: {operacion.get('saldo_entrada',0):.2f} USDT\n"
                             f"Saldo final: {operacion.get('saldo_final',0):.2f} USDT\n"
                             f"Comisión: {operacion.get('comision_usdt',0):.4f} USDT\n"
                             f"Motivo: {operacion.get('motivo_cierre','')}\n"
                             f"Patrón: {operacion.get('patron_detectado','')}\n"
                             f"Fecha entrada: {operacion.get('fecha_entrada','')}\n"
-                            f"Fecha salida: {operacion.get('fecha_salida','') if 'fecha_salida' in operacion else ''}"
+                            f"Fecha salida: {operacion.get('fecha_salida','') if 'fecha_salida' in operacion else ''}\n\n"
+                            f"{despedida}"
                         )
                         enviar_telegram_mensaje(mensaje)
                     except Exception as e:
@@ -892,6 +858,7 @@ def main():
             continue
 
 
+
 # Mostrar log de operaciones al finalizar y entrenar con Gemini
 def mostrar_resumen_y_entrenar():
     if log_operaciones:
@@ -923,4 +890,7 @@ if __name__ == "__main__":
     print("Bot de trading inicializado. Ejecutando ciclo principal...")
     main()
     mostrar_resumen_y_entrenar()
-
+#!/usr/bin/env python3
+"""
+Versión renombrada de historico_btcusdt.py — se ejecuta como `tradingbot.py`.
+"""

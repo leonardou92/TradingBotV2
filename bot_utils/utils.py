@@ -1,10 +1,22 @@
 import time
 from datetime import datetime
 
-def fetch_ohlcv_safe(exchange, symbol, timeframe, limit):
+def fetch_ohlcv_safe(exchange, symbol, timeframe, limit, since=None):
+    """Intentar obtener OHLCV con reintentos.
+
+    Parámetros:
+    - exchange: instancia ccxt
+    - symbol: par
+    - timeframe: timeframe
+    - limit: número de velas
+    - since: timestamp ms opcional para paginación
+    """
     for intento in range(3):
         try:
-            return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if since is None:
+                return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            else:
+                return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
         except Exception as e:
             print(f"[ERROR] Fallo al obtener OHLCV ({intento+1}/3): {e}")
             time.sleep(5)
