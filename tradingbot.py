@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import sys
 import json
 import os
 import time
@@ -24,7 +25,8 @@ import traceback
 # Cargar variables de entorno desde .env
 load_dotenv()
 # Control para mostrar gráficas en ventanas (evitar pop-ups en ejecución de segundo plano)
-SHOW_PLOTS = os.getenv('SHOW_PLOTS', '0') == '1'
+# Si se ejecuta en una terminal interactiva (foreground) forzamos la muestra para facilitar debugging/visualización.
+SHOW_PLOTS = os.getenv('SHOW_PLOTS', '0') == '1' or sys.stdout.isatty()
 
 def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limit=2000, chunk=500, log_path='log_operaciones_historico.json'):
     """
@@ -316,11 +318,16 @@ df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
 df = calcular_indicadores(df)
 
 # Gráficos
+fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14,10), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
 if SHOW_PLOTS:
     plt.ion()
+    # Asegurar que la ventana se cree en sesiones interactivas
+    try:
+        plt.show(block=False)
+    except Exception:
+        pass
 else:
     plt.ioff()
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14,10), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
 
 
 # Función para graficar velas japonesas
@@ -552,10 +559,30 @@ def main():
                 tp = posicion_abierta.get('tp', y_pos * (1.01 if posicion_abierta['tipo'] == 'long' else 0.99))
                 margin = posicion_abierta.get('margin', None)
                 apal = posicion_abierta.get('apalancamiento', None)
-                ax1.axhline(y=sl, color='red', linestyle=':', linewidth=1.2, alpha=0.8, label='SL')
-                ax1.axhline(y=tp, color='green', linestyle=':', linewidth=1.2, alpha=0.8, label='TP')
+                # Dibujar bandas/áreas para SL y TP para visual claro
+                min_band = min(sl, y_pos)
+                max_band = max(sl, y_pos)
+                ax1.fill_between(df['datetime'], min_band, max_band, color='red' if posicion_abierta['tipo']=='long' else 'red', alpha=0.08)
+                min_tp_band = min(tp, y_pos)
+                max_tp_band = max(tp, y_pos)
+                ax1.fill_between(df['datetime'], min_tp_band, max_tp_band, color='green' if posicion_abierta['tipo']=='long' else 'green', alpha=0.06)
+                ax1.axhline(y=sl, color='red', linestyle=':', linewidth=1.2, alpha=0.9, label='SL')
+                ax1.axhline(y=tp, color='green', linestyle=':', linewidth=1.2, alpha=0.9, label='TP')
                 ax1.text(df['datetime'].iloc[-1], sl, f'SL: {sl:.2f}', color='red', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
                 ax1.text(df['datetime'].iloc[-1], tp, f'TP: {tp:.2f}', color='green', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
+                # Mostrar margin y apalancamiento cerca del borde derecho de la gráfica
+                extra_info_y = df['close'].iloc[-1] * 1.03
+                margin_text = f"Margin: {margin:.2f} USDT" if margin is not None else "Margin: N/A"
+                apal_text = f"Apalancamiento: x{apal}" if apal is not None else "Apalancamiento: N/A"
+                ax1.text(df['datetime'].iloc[-1], extra_info_y, f"{margin_text} | {apal_text}", color='black', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
+                # Calcular y mostrar PnL tanto en % como en USDT
+                if posicion_abierta['tipo'] == 'long':
+                    pnl_pct = (last_price - posicion_abierta['precio_entrada']) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
+                else:
+                    pnl_pct = (posicion_abierta['precio_entrada'] - last_price) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
+                pnl_usdt = saldo * (pnl_pct / 100)
+                pnl_color = 'green' if pnl_pct >= 0 else 'red'
+                ax1.text(df['datetime'].iloc[-1], df['close'].iloc[-1]*0.99, f"PnL: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)", color=pnl_color, fontsize=11, ha='left', va='top', bbox=dict(facecolor='white', alpha=0.8))
                 # Mostrar margin y apalancamiento cerca del borde derecho de la gráfica
                 extra_info_y = df['close'].iloc[-1] * 1.03
                 margin_text = f"Margin: {margin:.2f} USDT" if margin is not None else "Margin: N/A"
@@ -592,15 +619,31 @@ def main():
                 """Retorna el saldo efectivo que incluye PnL no realizado de la posición abierta (si existe)."""
                 if posicion_abierta is None:
                     return saldo
+                # Si hay posición abierta, incluir PnL no realizado en USDT para reflejar balance efectivo
                 entrada = posicion_abierta.get('precio_entrada', 0)
                 tipo_pos = posicion_abierta.get('tipo')
                 apal = posicion_abierta.get('apalancamiento', 1)
-                # Calcular PnL no realizado en USDT según tipo
+                margin_at_entry = posicion_abierta.get('margin', saldo)
+                # pnl_pct sobre el margin = cambio_relativo * apal
+                if entrada == 0:
+                    return saldo
                 if tipo_pos == 'long':
-                    pnl = (last_price - entrada) / entrada * apal * saldo / 100
+                    pnl_pct_on_margin = (last_price - entrada) / entrada * apal * 100
                 else:
-                    pnl = (entrada - last_price) / entrada * apal * saldo / 100
-                return max(0.0, saldo + pnl)
+                    pnl_pct_on_margin = (entrada - last_price) / entrada * apal * 100
+                pnl_usdt = margin_at_entry * (pnl_pct_on_margin / 100)
+                return saldo + pnl_usdt
+
+            def compute_unrealized_pnl(last_price, entrada, tipo_pos, apal, margin_amount):
+                """Retorna (pnl_pct_on_margin, pnl_usdt) donde pnl_pct_on_margin es % sobre el margin."""
+                if entrada == 0 or margin_amount is None:
+                    return 0.0, 0.0
+                if tipo_pos == 'long':
+                    pnl_pct = (last_price - entrada) / entrada * apal * 100
+                else:
+                    pnl_pct = (entrada - last_price) / entrada * apal * 100
+                pnl_usdt = margin_amount * (pnl_pct / 100)
+                return pnl_pct, pnl_usdt
 
             ema_cross = (df['EMA_5'].iloc[-2] < df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] > df['EMA_660'].iloc[-1]) or \
                         (df['EMA_5'].iloc[-2] > df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] < df['EMA_660'].iloc[-1])
@@ -719,12 +762,16 @@ def main():
                     motivo_cierre = 'TP'
                 if cerrar_ia or sl_hit or tp_hit:
                     saldo_entrada = saldo
-                    resultado = (last_price - posicion_abierta['precio_entrada']) if posicion_abierta['tipo'] == 'long' else (posicion_abierta['precio_entrada'] - last_price)
-                    resultado_pct = resultado / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
-                    ganancia = saldo * (resultado_pct / 100)
+                    # Usar margin y apalancamiento para calcular la ganancia/ pérdida real sobre el margin
+                    entrada_price = posicion_abierta['precio_entrada']
+                    apal = posicion_abierta.get('apalancamiento', 1)
+                    margin_amount = posicion_abierta.get('margin', saldo_entrada)
+                    pnl_pct_on_margin, pnl_usdt = compute_unrealized_pnl(last_price, entrada_price, posicion_abierta['tipo'], apal, margin_amount)
+                    # La ganancia real que se suma al saldo es pnl_usdt (ya está en USDT). Comisiones se calculan sobre el notional aproximado
+                    notional = margin_amount * apal
                     comision_pct = 0.0004 * 2
-                    comision = saldo_entrada * comision_pct
-                    saldo += ganancia - comision
+                    comision = notional * comision_pct
+                    saldo = saldo + pnl_usdt - comision
                     operacion = {
                         'tipo': posicion_abierta['tipo'],
                         'precio_entrada': posicion_abierta['precio_entrada'],
@@ -732,8 +779,9 @@ def main():
                         'precio_salida': last_price,
                         'fecha_salida': str(now),
                         'apalancamiento': posicion_abierta['apalancamiento'],
-                        'resultado_pct': resultado_pct,
-                        'ganancia_usdt': ganancia,
+                        'resultado_pct': pnl_pct_on_margin,
+                        'ganancia_usdt': pnl_usdt,
+                        'patron_detectado': posicion_abierta.get('patron_detectado',''),
                         'comision_usdt': comision,
                         'saldo_entrada': saldo_entrada,
                         'saldo_final': saldo,
