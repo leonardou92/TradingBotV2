@@ -26,6 +26,10 @@ def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limi
     """
     Descarga históricos extensos, detecta patrones, simula entradas y entrena el modelo ML y Gemini AI.
     """
+    try:
+        enviar_telegram_mensaje("⬇️ Descargando histórico de datos para entrenamiento...")
+    except Exception as e:
+        print(f"[TELEGRAM] Error al notificar descarga: {e}")
     exchange = ccxt.binance()
     all_ohlcv = []
     since = None
@@ -64,9 +68,11 @@ def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limi
     with open(log_path, 'w') as f:
         json.dump(log_ops, f, indent=2)
     print(f"Histórico de operaciones simulado guardado en {log_path} ({len(log_ops)} operaciones)")
-    # Entrenamiento ML local
+    try:
+        enviar_telegram_mensaje("🤖 Entrenando modelo ML con el histórico descargado...")
+    except Exception as e:
+        print(f"[TELEGRAM] Error al notificar entrenamiento: {e}")
     entrenar_modelo_rf(df)
-    # Entrenamiento Gemini AI
     entrenar_con_gemini(log_path)
 import requests
 
