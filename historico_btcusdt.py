@@ -1,35 +1,27 @@
-# --- Utilidades robustas para red y snapshots ---
-def fetch_ohlcv_safe(exchange, symbol, timeframe, limit):
-    """Obtiene OHLCV con manejo de errores de red/exchange."""
-    for intento in range(3):
-        try:
-            return exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        except Exception as e:
-            print(f"[ERROR] Fallo al obtener OHLCV ({intento+1}/3): {e}")
-            time.sleep(5)
-    raise RuntimeError("No se pudo obtener datos OHLCV tras 3 intentos.")
+# --- IMPORTS MODULARES ---
+from bot_utils.utils import fetch_ohlcv_safe, save_plot_snapshot
+from bot_utils.indicadores import calcular_indicadores
+from bot_utils.patrones import detectar_onda_elliott, detectar_fibonacci_experto
+from bot_utils.estrategias import decision_cierre_ia
+from bot_utils.plot_utils import plot_candles
+from bot_utils.ml_utils import entrenar_modelo_rf
+from bot_utils.telegram_utils import enviar_telegram_mensaje
 
-def save_plot_snapshot(fig, filename_prefix="snapshot"): 
-    """Guarda un snapshot de la figura actual para backtesting visual."""
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{filename_prefix}_{timestamp}.png"
-    fig.savefig(filename)
-    print(f"[SNAPSHOT] Gráfico guardado: {filename}")
+import ccxt
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import json
+import os
+import time
+from datetime import datetime
+import threading
+from sklearn.model_selection import cross_val_score, GridSearchCV
+from dotenv import load_dotenv
 
-# --- Lógica de cierre inteligente durante operación ---
-def decision_cierre_ia(df, posicion_abierta, ml_pred):
-    """
-    Decide si mantener o cerrar la posición según IA y patrón experto.
-    """
-    # Solo cerrar si la predicción ML y el patrón experto coinciden en reversa clara
-    if posicion_abierta['tipo'] == 'long':
-        mantener = not (ml_pred == 0 and (detectar_onda_elliott(df, 30)[0] == 'bajista' or detectar_fibonacci_experto(df, 50)[0] == 'short'))
-    elif posicion_abierta['tipo'] == 'short':
-        mantener = not (ml_pred == 1 and (detectar_onda_elliott(df, 30)[0] == 'alcista' or detectar_fibonacci_experto(df, 50)[0] == 'long'))
-    else:
-        mantener = False
-    return mantener
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 # --- Descarga y entrenamiento automático con históricos largos ---
 def descargar_y_entrenar_historico(symbol='ETH/USDT', timeframe='5m', total_limit=2000, chunk=500, log_path='log_operaciones_historico.json'):
@@ -83,7 +75,7 @@ import requests
 
 # Configuración Gemini AI
 GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent'
-GEMINI_API_KEY = 'AIzaSyC5PMYvtelXMaGJIKqkbo_GJFlNr6URkTQ'  # Reemplaza por tu clave real
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')  # Cargar clave desde variable de entorno
 
 def entrenar_con_gemini(log_path='log_operaciones.json'):
     """

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Entorno virtual
+.venv/
+venv/
+ENV/
+
+# Archivos de configuración sensibles
+.env
+telegram_config.py
+
+# Archivos de logs y snapshots
+*.log
+*.json
+*.png
+
+# VSCode
+.vscode/
