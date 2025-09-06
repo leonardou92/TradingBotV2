@@ -1,3 +1,7 @@
+df = None
+posicion_abierta = None
+log_operaciones = []
+saldo = 100.0
 #!/usr/bin/env python3
 # --- IMPORTS MODULARES ---
 from bot_utils.utils import fetch_ohlcv_safe, save_plot_snapshot
@@ -455,7 +459,19 @@ def notify_connection_recovered_once():
 
 # --- FLUJO PRINCIPAL DEL BOT ---
 def main():
-    global df, posicion_abierta, log_operaciones, saldo
+    # Inicializar df con datos OHLCV válidos si está vacío
+    global df, exchange, symbol, posicion_abierta, saldo, log_operaciones
+    if df is None or not hasattr(df, 'shape') or df.shape[0] == 0:
+        # Ejemplo: descarga de datos iniciales
+        exchange = ccxt.binance()
+        symbol = 'BTC/USDT'
+        ohlcv = fetch_ohlcv_safe(exchange, symbol, '5m', 500)
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+    # Depuración: mostrar estado del DataFrame antes de graficar
+    print("[DEBUG] Últimas filas del DataFrame:")
+    print(df.tail())
+    print("[DEBUG] Columnas del DataFrame:", df.columns.tolist())
     print("Entrenando modelo ML...")
     clf, best_score = entrenar_modelo_rf(df)
     print("Modelo ML listo. Iniciando ciclo de trading...")
@@ -468,355 +484,190 @@ def main():
     cerrar_operacion_snapshot = False
     notificado_espera = False
     while True:
-        # Manejo robusto de errores: reintentos con backoff para evitar caída por problemas de red
         try:
-            # Recalcular indicadores para asegurar que todas las columnas existen
+            # 1. Actualizar indicadores y obtener precio actual
             df = calcular_indicadores(df)
-            # reintentar fetch_ticker en caso de fallo
-            retry_attempts = 0
-            while True:
-                try:
-                    ticker = exchange.fetch_ticker(symbol)
-                    # Si antes había fallo, notificar recuperación una sola vez
-                    notify_connection_recovered_once()
-                    break
-                except Exception as e:
-                    retry_attempts += 1
-                    # Notificar fallo la primera vez y luego cada FAILURE_NOTIFY_INTERVAL segundos
-                    notify_connection_failure_once(str(e))
-                    wait = min(60, 2 ** retry_attempts)
-                    print(f"[WARN] fetch_ticker fallo (intento {retry_attempts}): {e}. Reintentando en {wait}s...")
-                    traceback.print_exc()
-                    time.sleep(wait)
+            ticker = exchange.fetch_ticker(symbol)
             last_price = ticker['last']
 
-            # Detectar señal 4EMA: EMA_1 > EMA_3 > EMA_10 > EMA_55 para long, o al revés para short
-            entrada_idx = None
+            # 2. Calcular señales y factores
             ema1 = df['EMA_1'].iloc[-1]
             ema3 = df['EMA_3'].iloc[-1]
             ema10 = df['EMA_10'].iloc[-1]
             ema55 = df['EMA_55'].iloc[-1]
-            print(f"EMA_1: {ema1:.2f}, EMA_3: {ema3:.2f}, EMA_10: {ema10:.2f}, EMA_55: {ema55:.2f}")
             tol = 0.01
             long_patron = (ema1 >= ema3 - tol) and (ema3 >= ema10 - tol) and (ema10 >= ema55 - tol) and (ema1 > ema3 and ema3 > ema10 and ema10 > ema55)
             short_patron = (ema1 <= ema3 + tol) and (ema3 <= ema10 + tol) and (ema10 <= ema55 + tol) and (ema1 < ema3 and ema3 < ema10 and ema10 < ema55)
-            if long_patron:
-                print("Señal LONG detectada por 4EMA (patrón flexible)")
-                entrada_idx = len(df) - 1
-            elif short_patron:
-                print("Señal SHORT detectada por 4EMA (patrón flexible)")
-                entrada_idx = len(df) - 1
-            elif (abs(ema1-ema3)<tol or abs(ema3-ema10)<tol or abs(ema10-ema55)<tol):
-                print("EMAs muy cerca, pero no cumplen el patrón exacto.")
+            # ...existing code...
+            # Al final del ciclo, refrescar cada 1 segundo
+            import time
+            time.sleep(1)
 
-            plot_candles(ax1, df, entrada_idx=entrada_idx)
-            ax1.plot(df['datetime'], df['EMA_660'], label='EMA 660', color='blue', linewidth=1)
-            ax1.plot(df['datetime'], df['EMA_5'], label='EMA 5', color='orange', linewidth=1)
-            ax1.plot(df['datetime'], df['EMA_4'], label='EMA 4', color='magenta', linewidth=1)
-            ax1.plot(df['datetime'], df['EMA_55'], label='EMA 55', color='red', linewidth=1, linestyle='--')
-            ax1.plot(df['datetime'], df['EMA_10'], label='EMA 10', color='green', linewidth=1, linestyle='--')
-            ax1.plot(df['datetime'], df['EMA_3'], label='EMA 3', color='cyan', linewidth=1, linestyle='--')
-            ax1.plot(df['datetime'], df['EMA_1'], label='EMA 1', color='black', linewidth=1, linestyle='--')
-            df = calcular_indicadores(df)
-            for col in ['DONCHIAN_HIGH', 'DONCHIAN_LOW', 'DONCHIAN_RIBBON']:
-                if col not in df.columns:
-                    df[col] = np.nan
-            ax1.plot(df['datetime'], df['DONCHIAN_HIGH'], color='orange', linestyle='--', linewidth=1, alpha=0.7, label='Donchian High')
-            ax1.plot(df['datetime'], df['DONCHIAN_LOW'], color='blue', linestyle='--', linewidth=1, alpha=0.7, label='Donchian Low')
-            for i in range(-20, 0):
-                val = df['DONCHIAN_RIBBON'].iloc[i] if not pd.isnull(df['DONCHIAN_RIBBON'].iloc[i]) else 0
-                color = 'lime' if val == 1 else ('red' if val == -1 else 'gray')
-                ax1.axvspan(df['datetime'].iloc[i-1], df['datetime'].iloc[i], color=color, alpha=0.08)
-            ax1.legend(loc='upper left', fontsize=8)
-
-            ax3.clear()
-            ax3.plot(df['datetime'], df['TREND_METER'], color='purple', label='Trend Meter', linewidth=1.5)
-            ax3.plot(df['datetime'], df['EFMUS'], color='magenta', label='EFMUS', linewidth=1)
-            ax3.axhline(0, color='gray', linestyle='--', linewidth=0.8)
-            ax3.set_ylabel('Trend/EFMUS')
-            ax3.legend(loc='upper left', fontsize=8)
-            ax3.set_title('Trend Meter y EFMUS')
-            ax3.grid(True, linestyle='--', alpha=0.3)
-            for i in range(-20, 0):
-                if df['EFMUS_SIGNAL'].iloc[i] == 2:
-                    ax3.axvline(df['datetime'].iloc[i], color='lime', linestyle=':', alpha=0.2)
-                elif df['EFMUS_SIGNAL'].iloc[i] == -2:
-                    ax3.axvline(df['datetime'].iloc[i], color='red', linestyle=':', alpha=0.2)
-            ax1.text(df['datetime'].iloc[-1], last_price, f'Precio actual: {last_price:.2f}',
-                     color='black', fontsize=10, ha='left', va='bottom', bbox=dict(facecolor='yellow', alpha=0.5))
-            ax1.text(df['datetime'].iloc[-1], last_price*1.03, f'Saldo: {saldo:.2f} USDT',
-                     color='blue', fontsize=12, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.7))
-
-            # Mostrar información de posición si existe
-            if posicion_abierta is not None:
-                y_pos = posicion_abierta['precio_entrada']
-                color_pos = 'green' if posicion_abierta['tipo'] == 'long' else 'red'
-                ax1.axhline(y=y_pos, color=color_pos, linestyle='--', linewidth=1.5, alpha=0.7)
-                ax1.text(df['datetime'].iloc[-1], y_pos, f"{posicion_abierta['tipo'].upper()} @ {y_pos:.2f}",
-                         color=color_pos, fontsize=10, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
-                # Usar SL/TP almacenados en la posición (si existen), si no calcular por defecto
-                sl = posicion_abierta.get('sl', y_pos * (0.99 if posicion_abierta['tipo'] == 'long' else 1.01))
-                tp = posicion_abierta.get('tp', y_pos * (1.01 if posicion_abierta['tipo'] == 'long' else 0.99))
-                margin = posicion_abierta.get('margin', None)
-                apal = posicion_abierta.get('apalancamiento', None)
-                # Dibujar bandas/áreas para SL y TP para visual claro
-                min_band = min(sl, y_pos)
-                max_band = max(sl, y_pos)
-                ax1.fill_between(df['datetime'], min_band, max_band, color='red' if posicion_abierta['tipo']=='long' else 'red', alpha=0.08)
-                min_tp_band = min(tp, y_pos)
-                max_tp_band = max(tp, y_pos)
-                ax1.fill_between(df['datetime'], min_tp_band, max_tp_band, color='green' if posicion_abierta['tipo']=='long' else 'green', alpha=0.06)
-                ax1.axhline(y=sl, color='red', linestyle=':', linewidth=1.2, alpha=0.9, label='SL')
-                ax1.axhline(y=tp, color='green', linestyle=':', linewidth=1.2, alpha=0.9, label='TP')
-                ax1.text(df['datetime'].iloc[-1], sl, f'SL: {sl:.2f}', color='red', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
-                ax1.text(df['datetime'].iloc[-1], tp, f'TP: {tp:.2f}', color='green', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
-                # Mostrar margin y apalancamiento cerca del borde derecho de la gráfica
-                extra_info_y = df['close'].iloc[-1] * 1.03
-                margin_text = f"Margin: {margin:.2f} USDT" if margin is not None else "Margin: N/A"
-                apal_text = f"Apalancamiento: x{apal}" if apal is not None else "Apalancamiento: N/A"
-                ax1.text(df['datetime'].iloc[-1], extra_info_y, f"{margin_text} | {apal_text}", color='black', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
-                # Calcular y mostrar PnL tanto en % como en USDT
-                if posicion_abierta['tipo'] == 'long':
-                    pnl_pct = (last_price - posicion_abierta['precio_entrada']) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
-                else:
-                    pnl_pct = (posicion_abierta['precio_entrada'] - last_price) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
-                pnl_usdt = saldo * (pnl_pct / 100)
-                pnl_color = 'green' if pnl_pct >= 0 else 'red'
-                ax1.text(df['datetime'].iloc[-1], df['close'].iloc[-1]*0.99, f"PnL: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)", color=pnl_color, fontsize=11, ha='left', va='top', bbox=dict(facecolor='white', alpha=0.8))
-                # Mostrar margin y apalancamiento cerca del borde derecho de la gráfica
-                extra_info_y = df['close'].iloc[-1] * 1.03
-                margin_text = f"Margin: {margin:.2f} USDT" if margin is not None else "Margin: N/A"
-                apal_text = f"Apalancamiento: x{apal}" if apal is not None else "Apalancamiento: N/A"
-                ax1.text(df['datetime'].iloc[-1], extra_info_y, f"{margin_text} | {apal_text}", color='black', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
-                ax1.text(df['datetime'].iloc[-1], df['close'].iloc[-1], f"TrendMeter: {df['TREND_METER'].iloc[-1]}", color='purple', fontsize=10, ha='left', va='top', bbox=dict(facecolor='white', alpha=0.5))
-
-            if 'SQZ_ON' not in df.columns:
-                print('Error: La columna SQZ_ON no está presente en el DataFrame. Recalculando indicadores...')
-                df = calcular_indicadores(df)
-                if 'SQZ_ON' not in df.columns:
-                    raise KeyError('No se pudo calcular la columna SQZ_ON. Revisa el cálculo de indicadores.')
-
-            if 'sl' in locals() and 'tp' in locals():
-                print(f"SL: {sl:.2f} | TP: {tp:.2f}")
-
+            # 3. Entrenar modelo ML y predecir
+            clf, best_score = entrenar_modelo_rf(df)
+            features = [
+                'EMA_660', 'EMA_5', 'EMA_4', 'EMA_55', 'EMA_10', 'EMA_3', 'EMA_1',
+                'RSI_14_EMA5', 'ATR_14', 'MACD', 'MACD_signal',
+                'PSAR', 'SQZMOM_LB', 'BB_upper', 'BB_lower', 'KC_upper', 'KC_lower', 'close', 'volume'
+            ]
             ml_pred = None
-            ml_text = ''
             if clf is not None:
                 ult = df[features].iloc[[-1]].values
                 ml_pred = clf.predict(ult)[0]
-                ml_text = 'ML: COMPRAR' if ml_pred == 1 else 'ML: VENDER'
-                ax1.text(df['datetime'].iloc[-1], last_price*1.01, ml_text,
-                         color='green' if ml_pred == 1 else 'red', fontsize=12, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.7))
 
-            now = df['datetime'].iloc[-1]
+            # 4. Calcular volatilidad y apalancamiento
             volatilidad = df['close'].rolling(window=10).std().iloc[-1]
-            max_leverage = 20
-            min_leverage = 10
+            max_leverage = 50
+            min_leverage = 20
             leverage = int(max(min_leverage, min(max_leverage, round(10 - min(volatilidad, 5)))))
 
-            # Helper: calcular saldo efectivo incluyendo PnL no realizado para usar como margin disponible
-            def saldo_con_pnl_actual():
-                """Retorna el saldo efectivo que incluye PnL no realizado de la posición abierta (si existe)."""
-                if posicion_abierta is None:
-                    return saldo
-                # Si hay posición abierta, incluir PnL no realizado en USDT para reflejar balance efectivo
-                entrada = posicion_abierta.get('precio_entrada', 0)
-                tipo_pos = posicion_abierta.get('tipo')
-                apal = posicion_abierta.get('apalancamiento', 1)
-                margin_at_entry = posicion_abierta.get('margin', saldo)
-                # pnl_pct sobre el margin = cambio_relativo * apal
-                if entrada == 0:
-                    return saldo
-                if tipo_pos == 'long':
-                    pnl_pct_on_margin = (last_price - entrada) / entrada * apal * 100
-                else:
-                    pnl_pct_on_margin = (entrada - last_price) / entrada * apal * 100
-                pnl_usdt = margin_at_entry * (pnl_pct_on_margin / 100)
-                return saldo + pnl_usdt
-
-            def compute_unrealized_pnl(last_price, entrada, tipo_pos, apal, margin_amount):
-                """Retorna (pnl_pct_on_margin, pnl_usdt) donde pnl_pct_on_margin es % sobre el margin."""
-                if entrada == 0 or margin_amount is None:
-                    return 0.0, 0.0
-                if tipo_pos == 'long':
-                    pnl_pct = (last_price - entrada) / entrada * apal * 100
-                else:
-                    pnl_pct = (entrada - last_price) / entrada * apal * 100
-                pnl_usdt = margin_amount * (pnl_pct / 100)
-                return pnl_pct, pnl_usdt
-
-            ema_cross = (df['EMA_5'].iloc[-2] < df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] > df['EMA_660'].iloc[-1]) or \
-                        (df['EMA_5'].iloc[-2] > df['EMA_660'].iloc[-2] and df['EMA_5'].iloc[-1] < df['EMA_660'].iloc[-1])
-            macd_bull = df['MACD'].iloc[-1] > df['MACD_signal'].iloc[-1]
-            macd_bear = df['MACD'].iloc[-1] < df['MACD_signal'].iloc[-1]
-            rsi_bull = df['RSI_14_EMA5'].iloc[-1] < 30
-            rsi_bear = df['RSI_14_EMA5'].iloc[-1] > 70
-
-            onda_tipo, onda_idxs = detectar_onda_elliott(df)
-            elliott_long = onda_tipo == 'alcista'
-            elliott_short = onda_tipo == 'bajista'
-
-            abrir_long = ema_cross and macd_bull and rsi_bull and ml_pred == 1 and elliott_long
-            abrir_short = ema_cross and macd_bear and rsi_bear and ml_pred == 0 and elliott_short
-
+            # 5. Lógica de entrada/salida modularizada
+            from bot_utils.gestion_operaciones import manejar_entrada, manejar_salida
+            estado_consola = ""
             if posicion_abierta is None:
-                tipo = None
-                patron_detectado = None
-                elliott_tipo, elliott_idxs = detectar_onda_elliott(df, lookback=30)
-                fibo_tipo, fibo_levels, fibo_idxs = detectar_fibonacci_experto(df, lookback=50)
-                if elliott_tipo is not None:
-                    tipo = 'long' if elliott_tipo == 'alcista' else 'short'
-                    patron_detectado = f"elliott_{elliott_tipo}"
-                elif fibo_tipo is not None:
-                    tipo = fibo_tipo
-                    patron_detectado = f"fibonacci_{fibo_tipo}"
-                if tipo is not None:
-                    # Calcular SL, TP y margin
-                    if tipo == 'long':
-                        sl = last_price * 0.99
-                        tp = last_price * 1.01
-                    else:
-                        sl = last_price * 1.01
-                        tp = last_price * 0.99
-                    margin = saldo_con_pnl_actual() if leverage > 0 else 0
-                    posicion_abierta = {
-                        'tipo': tipo,
-                        'precio_entrada': last_price,
-                        'fecha_entrada': str(now),
-                        'apalancamiento': leverage,
-                        'indicadores': {k: float(df[k].iloc[-1]) for k in features},
-                        'patron_detectado': patron_detectado,
-                        'prediccion': tipo,
-                        'sl': sl,
-                        'tp': tp,
-                        'margin': margin
-                    }
-                if onda_idxs is not None:
-                    elliott_color = 'green' if onda_tipo == 'alcista' else 'red'
-                    elliott_label = f"Onda Elliott: {onda_tipo.upper()}"
-                    ax1.plot(df['datetime'].iloc[onda_idxs], df['close'].iloc[onda_idxs], marker='o', color=elliott_color, linestyle='-', linewidth=2, label=elliott_label)
-                    ax1.text(df['datetime'].iloc[onda_idxs[-1]], df['close'].iloc[onda_idxs[-1]]*1.01, elliott_label, color=elliott_color, fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.2))
-                if abrir_long:
-                    tipo = 'long'
-                elif abrir_short:
-                    tipo = 'short'
-                if tipo is not None:
-                    # Calcular SL, TP y margin
-                    if tipo == 'long':
-                        sl = last_price * 0.99
-                        tp = last_price * 1.01
-                    else:
-                        sl = last_price * 1.01
-                        tp = last_price * 0.99
-                    margin = saldo_con_pnl_actual() if leverage > 0 else 0
-                    posicion_abierta = {
-                        'tipo': tipo,
-                        'precio_entrada': last_price,
-                        'fecha_entrada': str(now),
-                        'apalancamiento': leverage,
-                        'indicadores': {k: float(df[k].iloc[-1]) for k in features},
-                        'patron_detectado': patron_detectado,
-                        'prediccion': tipo,
-                        'sl': sl,
-                        'tp': tp,
-                        'margin': margin
-                    }
-                    # Notificación Telegram de entrada detallada
-                    try:
-                        mensaje = (
-                            f"🚦 ENTRADA: {patron_detectado}\n"
-                            f"Tipo: {tipo.upper()}\n"
-                            f"Precio: {last_price:.2f} USDT\n"
-                            f"Fecha: {now}\n"
-                            f"SL: {sl:.2f} USDT\n"
-                            f"TP: {tp:.2f} USDT\n"
-                            f"Margin: {margin:.2f} USDT\n"
-                            f"Apalancamiento: x{leverage}\n"
-                            f"Saldo: {saldo:.2f} USDT"
-                        )
-                        enviar_telegram_mensaje(mensaje)
-                    except Exception as e:
-                        print(f"[TELEGRAM] Error al notificar entrada: {e}")
-                    save_plot_snapshot(fig, filename_prefix="backtest_entrada")
-                    abrir_operacion_snapshot = True
-                    cerrar_operacion_snapshot = False
+                estado_consola = "Estado: Analizando mercado | Esperando señal de entrada"
+                nueva_pos = manejar_entrada(df, last_price, ml_pred, leverage, saldo, features)
+                if nueva_pos:
+                    nueva_pos['factores'] = {k: float(df[k].iloc[-1]) for k in features if k in df.columns}
+                    posicion_abierta = nueva_pos
+                    tp = posicion_abierta.get('tp', posicion_abierta['precio_entrada'] * (1.01 if posicion_abierta['tipo'] == 'long' else 0.99))
+                    sl = posicion_abierta.get('sl', posicion_abierta['precio_entrada'] * (0.99 if posicion_abierta['tipo'] == 'long' else 1.01))
+                    estado_consola = (
+                        f"--- OPERACIÓN ABIERTA --- | "
+                        f"Tipo: {posicion_abierta['tipo'].upper()} | Entrada: {posicion_abierta['precio_entrada']:.2f} USDT | "
+                        f"TP: {tp:.2f} | SL: {sl:.2f} | "
+                        f"Apalancamiento: x{posicion_abierta['apalancamiento']}"
+                    )
             else:
-                mantener = decision_cierre_ia(df, posicion_abierta, ml_pred)
-                cerrar_ia = not mantener
-                if posicion_abierta['tipo'] == 'long':
-                    sl = posicion_abierta['precio_entrada'] * 0.99
-                    tp = posicion_abierta['precio_entrada'] * 1.01
-                    sl_hit = last_price <= sl
-                    tp_hit = last_price >= tp
+                saldo, posicion_abierta, log_operaciones = manejar_salida(df, posicion_abierta, last_price, saldo, features, log_operaciones, log_path)
+                if posicion_abierta is not None:
+                    tp = posicion_abierta.get('tp', posicion_abierta['precio_entrada'] * (1.01 if posicion_abierta['tipo'] == 'long' else 0.99))
+                    sl = posicion_abierta.get('sl', posicion_abierta['precio_entrada'] * (0.99 if posicion_abierta['tipo'] == 'long' else 1.01))
+                    if posicion_abierta['tipo'] == 'long':
+                        pnl = (last_price - posicion_abierta['precio_entrada']) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
+                    else:
+                        pnl = (posicion_abierta['precio_entrada'] - last_price) / posicion_abierta['precio_entrada'] * posicion_abierta['apalancamiento'] * 100
+                    color_pnl = '\033[92m' if pnl >= 0 else '\033[91m'  # verde si positivo, rojo si negativo
+                    reset_color = '\033[0m'
+                    estado_consola = (
+                        f"--- OPERACIÓN ABIERTA --- | "
+                        f"Tipo: {posicion_abierta['tipo'].upper()} | Entrada: {posicion_abierta['precio_entrada']:.2f} USDT | "
+                        f"TP: {tp:.2f} | SL: {sl:.2f} | "
+                        f"PnL: {color_pnl}{pnl:.2f}%{reset_color} | Apalancamiento: x{posicion_abierta['apalancamiento']}"
+                    )
                 else:
-                    sl = posicion_abierta['precio_entrada'] * 1.01
-                    tp = posicion_abierta['precio_entrada'] * 0.99
-                    sl_hit = last_price >= sl
-                    tp_hit = last_price <= tp
-                motivo_cierre = ''
-                if cerrar_ia:
-                    motivo_cierre = 'ML+INDICADORES'
-                elif sl_hit:
-                    motivo_cierre = 'SL'
-                elif tp_hit:
-                    motivo_cierre = 'TP'
-                if cerrar_ia or sl_hit or tp_hit:
-                    saldo_entrada = saldo
-                    # Usar margin y apalancamiento para calcular la ganancia/ pérdida real sobre el margin
-                    entrada_price = posicion_abierta['precio_entrada']
-                    apal = posicion_abierta.get('apalancamiento', 1)
-                    margin_amount = posicion_abierta.get('margin', saldo_entrada)
-                    pnl_pct_on_margin, pnl_usdt = compute_unrealized_pnl(last_price, entrada_price, posicion_abierta['tipo'], apal, margin_amount)
-                    # La ganancia real que se suma al saldo es pnl_usdt (ya está en USDT). Comisiones se calculan sobre el notional aproximado
-                    notional = margin_amount * apal
-                    comision_pct = 0.0004 * 2
-                    comision = notional * comision_pct
-                    saldo = saldo + pnl_usdt - comision
-                    operacion = {
-                        'tipo': posicion_abierta['tipo'],
-                        'precio_entrada': posicion_abierta['precio_entrada'],
-                        'fecha_entrada': posicion_abierta['fecha_entrada'],
-                        'precio_salida': last_price,
-                        'fecha_salida': str(now),
-                        'apalancamiento': posicion_abierta['apalancamiento'],
-                        'resultado_pct': pnl_pct_on_margin,
-                        'ganancia_usdt': pnl_usdt,
-                        'patron_detectado': posicion_abierta.get('patron_detectado',''),
-                        'comision_usdt': comision,
-                        'saldo_entrada': saldo_entrada,
-                        'saldo_final': saldo,
-                        'motivo_cierre': motivo_cierre,
-                        'indicadores_entrada': posicion_abierta['indicadores'],
-                        'indicadores_salida': {k: float(df[k].iloc[-1]) for k in features}
-                    }
-                    log_operaciones.append(operacion)
-                    with open(log_path, 'w') as f:
-                        json.dump(log_operaciones, f, indent=2)
-                    posicion_abierta = None
-                    # Notificación Telegram de salida
-                    try:
-                        resultado_pct = operacion.get('resultado_pct', 0)
-                        despedida = "me partieron 😭" if resultado_pct < 0 else "vamos pa dubai bro 😎 jajajaj"
-                        mensaje = (
-                            f"🏁 SALIDA: {operacion.get('tipo','')}\n"
-                            f"Entrada: {operacion.get('precio_entrada',0):.2f} USDT\n"
-                            f"Salida: {operacion.get('precio_salida',0):.2f} USDT\n"
-                            f"Resultado: {resultado_pct:.2f}%\n"
-                            f"Saldo entrada: {operacion.get('saldo_entrada',0):.2f} USDT\n"
-                            f"Saldo final: {operacion.get('saldo_final',0):.2f} USDT\n"
-                            f"Comisión: {operacion.get('comision_usdt',0):.4f} USDT\n"
-                            f"Motivo: {operacion.get('motivo_cierre','')}\n"
-                            f"Patrón: {operacion.get('patron_detectado','')}\n"
-                            f"Fecha entrada: {operacion.get('fecha_entrada','')}\n"
-                            f"Fecha salida: {operacion.get('fecha_salida','') if 'fecha_salida' in operacion else ''}\n\n"
-                            f"{despedida}"
-                        )
-                        enviar_telegram_mensaje(mensaje)
-                    except Exception as e:
-                        print(f"[TELEGRAM] Error al notificar salida: {e}")
-                    save_plot_snapshot(fig, filename_prefix="backtest_salida")
-                    cerrar_operacion_snapshot = True
-                    abrir_operacion_snapshot = False
+                    estado_consola = "Estado: Analizando mercado | Esperando señal de entrada"
+
+            # Mostrar estado en consola de forma estática (refrescando la línea)
+            # Mejorar legibilidad de respuestas API en consola
+            def mostrar_api_respuesta(respuesta, tipo):
+                if not respuesta:
+                    print(f"\n[API] No se recibió respuesta de {tipo}.")
+                elif isinstance(respuesta, dict) and 'error' in respuesta:
+                    print(f"\n[API] Error de {tipo}: {respuesta['error']}")
+                elif isinstance(respuesta, dict):
+                    print(f"\n[API] Respuesta de {tipo}: {respuesta.get('message', str(respuesta))}")
+                else:
+                    print(f"\n[API] Respuesta de {tipo}: {str(respuesta)}")
+
+            import sys
+            sys.stdout.write(f"\r{estado_consola.ljust(120)}")
+            sys.stdout.flush()
+
+            # Mostrar y actualizar la gráfica en tiempo real solo si hay datos válidos
+            import matplotlib.pyplot as plt
+            if df is not None and len(df) > 10 and not df.isnull().all().all():
+                # Graficar velas japonesas en ax1
+                from bot_utils.plot_utils import plot_candles
+                plot_candles(ax1, df)
+                # --- Indicadores sobre la gráfica principal ---
+                ax1.plot(df['datetime'], df['EMA_660'], label='EMA 660', color='blue', linewidth=1)
+                ax1.plot(df['datetime'], df['EMA_5'], label='EMA 5', color='orange', linewidth=1)
+                ax1.plot(df['datetime'], df['EMA_4'], label='EMA 4', color='magenta', linewidth=1)
+                ax1.plot(df['datetime'], df['EMA_55'], label='EMA 55', color='red', linewidth=1, linestyle='--')
+                ax1.plot(df['datetime'], df['EMA_10'], label='EMA 10', color='green', linewidth=1, linestyle='--')
+                ax1.plot(df['datetime'], df['EMA_3'], label='EMA_3', color='cyan', linewidth=1, linestyle='--')
+                ax1.plot(df['datetime'], df['EMA_1'], label='EMA_1', color='black', linewidth=1, linestyle='--')
+                if 'PSAR' in df.columns:
+                    ax1.plot(df['datetime'], df['PSAR'], label='PSAR', color='purple', linewidth=1, linestyle=':')
+                if 'DONCHIAN_HIGH' in df.columns:
+                    ax1.plot(df['datetime'], df['DONCHIAN_HIGH'], color='orange', linestyle='--', linewidth=1, alpha=0.7, label='Donchian High')
+                if 'DONCHIAN_LOW' in df.columns:
+                    ax1.plot(df['datetime'], df['DONCHIAN_LOW'], color='blue', linestyle='--', linewidth=1, alpha=0.7, label='Donchian Low')
+                # --- Marcar posición abierta en la gráfica ---
+                if posicion_abierta is not None:
+                    entrada_idx = len(df) - 1
+                    precio_entrada = posicion_abierta['precio_entrada']
+                    tp = posicion_abierta.get('tp', precio_entrada * (1.01 if posicion_abierta['tipo'] == 'long' else 0.99))
+                    sl = posicion_abierta.get('sl', precio_entrada * (0.99 if posicion_abierta['tipo'] == 'long' else 1.01))
+                    ax1.scatter(df['datetime'].iloc[entrada_idx], precio_entrada, color='lime', s=120, marker='*', label='Entrada')
+                    ax1.axhline(y=precio_entrada, color='lime', linestyle='-', linewidth=1.5, alpha=0.7, label='Precio Entrada')
+                    # Rellenar zona TP y SL
+                    min_x = df['datetime'].iloc[max(0, entrada_idx-30)]
+                    max_x = df['datetime'].iloc[entrada_idx]
+                    if tp > precio_entrada:
+                        ax1.axhspan(precio_entrada, tp, xmin=0, xmax=1, color='green', alpha=0.15, label='Zona TP')
+                    else:
+                        ax1.axhspan(tp, precio_entrada, xmin=0, xmax=1, color='green', alpha=0.15, label='Zona TP')
+                    if sl < precio_entrada:
+                        ax1.axhspan(sl, precio_entrada, xmin=0, xmax=1, color='red', alpha=0.15, label='Zona SL')
+                    else:
+                        ax1.axhspan(precio_entrada, sl, xmin=0, xmax=1, color='red', alpha=0.15, label='Zona SL')
+                    ax1.axhline(y=tp, color='green', linestyle='--', linewidth=1.2, alpha=0.8, label='TP')
+                    ax1.axhline(y=sl, color='red', linestyle='--', linewidth=1.2, alpha=0.8, label='SL')
+                    # --- PROGRESO DE LA OPERACIÓN ---
+                    last_price = df['close'].iloc[-1]
+                    ax1.plot([df['datetime'].iloc[entrada_idx], df['datetime'].iloc[-1]], [precio_entrada, last_price], color='deepskyblue', linewidth=2, linestyle='-', label='Progreso Operación')
+                    ax1.scatter(df['datetime'].iloc[-1], last_price, color='deepskyblue', s=100, marker='o', label='Precio Actual')
+                    ax1.text(df['datetime'].iloc[-1], last_price, f'Actual: {last_price:.2f}', color='deepskyblue', fontsize=10, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5))
+                    # Calcular y mostrar PnL
+                    if posicion_abierta['tipo'] == 'long':
+                        pnl = (last_price - precio_entrada) / precio_entrada * posicion_abierta['apalancamiento'] * 100
+                    else:
+                        pnl = (precio_entrada - last_price) / precio_entrada * posicion_abierta['apalancamiento'] * 100
+                    color_pnl = 'green' if pnl >= 0 else 'red'
+                    texto_pnl = f"PnL: {'+' if pnl >= 0 else ''}{pnl:.2f}% {'(Ganancia)' if pnl > 0 else '(Pérdida)' if pnl < 0 else '(Sin cambio)'}"
+                    ax1.text(df['datetime'].iloc[-1], last_price*1.01, texto_pnl, color=color_pnl, fontsize=11, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.5 if pnl != 0 else 0.3))
+                    # Mostrar SL y TP en la gráfica
+                    ax1.text(df['datetime'].iloc[-1], sl, f'SL: {sl:.2f}', color='red', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
+                    ax1.text(df['datetime'].iloc[-1], tp, f'TP: {tp:.2f}', color='green', fontsize=9, ha='left', va='bottom', bbox=dict(facecolor='white', alpha=0.3))
+                ax1.legend(loc='upper left', fontsize=8)
+                # --- Subgráfico ax2: RSI ---
+                ax2.clear()
+                ax2.plot(df['datetime'], df['RSI_14_EMA5'], label='RSI 14 (EMA 5)', color='purple')
+                ax2.axhline(70, color='red', linestyle='--', linewidth=0.8)
+                ax2.axhline(30, color='green', linestyle='--', linewidth=0.8)
+                ax2.set_ylabel('RSI')
+                ax2.set_xlabel('Fecha')
+                ax2.legend()
+                ax2.grid()
+                # --- Subgráfico ax3: MACD y Trend Meter ---
+                ax3.clear()
+                ax3.plot(df['datetime'], df['MACD'], label='MACD', color='blue', linewidth=1)
+                ax3.plot(df['datetime'], df['MACD_signal'], label='MACD Signal', color='red', linewidth=1, linestyle='--')
+                ax3.plot(df['datetime'], df['TREND_METER'], color='purple', label='Trend Meter', linewidth=1.5)
+                ax3.plot(df['datetime'], df['EFMUS'], color='magenta', label='EFMUS', linewidth=1)
+                ax3.axhline(0, color='gray', linestyle='--', linewidth=0.8)
+                ax3.set_ylabel('MACD / Trend / EFMUS')
+                ax3.legend(loc='upper left', fontsize=8)
+                ax3.set_title('MACD, Trend Meter y EFMUS')
+                ax3.grid(True, linestyle='--', alpha=0.3)
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+                if SHOW_PLOTS:
+                    plt.show(block=False)
+                plt.pause(0.01)
+            else:
+                print("[ADVERTENCIA] No hay datos suficientes para graficar. df vacío o inválido.")
+
+        except KeyboardInterrupt:
+            print("Interrumpido por el usuario.")
+            break
+        except Exception as e:
+            print(f"[ERROR] Excepción en ciclo principal: {e}")
+            traceback.print_exc()
+            time.sleep(5)
+            continue
 
             tipo_elliott, pivotes_elliott = detectar_onda_elliott(df, lookback=30)
             if tipo_elliott is not None:
@@ -907,18 +758,72 @@ def main():
 
 
 
+
 # Mostrar log de operaciones al finalizar y entrenar con Gemini
 def mostrar_resumen_y_entrenar():
-    if log_operaciones:
-        print("\nResumen de operaciones:")
-        for op in log_operaciones:
-            print(f"{op['fecha_entrada']} {op['tipo'].upper()} entrada: {op['precio_entrada']:.2f} salida: {op['precio_salida']:.2f} resultado: {op['resultado_pct']:.2f}% saldo entrada: {op['saldo_entrada']:.2f} saldo final: {op['saldo_final']:.2f} USDT comisión: {op['comision_usdt']:.4f} motivo: {op.get('motivo_cierre','')} patrón: {op.get('patron_detectado','')}")
-        # Entrenamiento con Gemini AI
-        entrenar_con_gemini(log_path)
+    print("\n===== RESUMEN DE OPERACIONES =====")
+    saldo_inicial = log_operaciones[0]['saldo_entrada'] if log_operaciones else 0
+    saldo_final = log_operaciones[-1]['saldo_final'] if log_operaciones else 0
+    print(f"Saldo inicial: {saldo_inicial:.2f} USDT")
+    print(f"Saldo final: {saldo_final:.2f} USDT")
+    print(f"Total operaciones: {len(log_operaciones)}")
+    if len(log_operaciones) == 0:
+        print("No se realizaron operaciones.")
+        return
+    ganadoras = [op for op in log_operaciones if op['resultado_pct'] > 0]
+    perdedoras = [op for op in log_operaciones if op['resultado_pct'] <= 0]
+    print(f"Ganadoras: {len(ganadoras)} | Perdedoras: {len(perdedoras)}")
+    pct_ganadoras = len(ganadoras) / len(log_operaciones) * 100
+    print(f"Porcentaje ganadoras: {pct_ganadoras:.2f}%")
+    ganancias = sum(op['ganancia_usdt'] for op in ganadoras)
+    perdidas = sum(op['ganancia_usdt'] for op in perdedoras)
+    print(f"Ganancia total: {ganancias:.2f} USDT | Pérdida total: {perdidas:.2f} USDT")
+    print(f"Comisiones totales: {sum(op['comision_usdt'] for op in log_operaciones):.4f} USDT")
+    print(f"Motivos de cierre:")
+    motivos = {}
+    for op in log_operaciones:
+        motivo = op.get('motivo_cierre','')
+        motivos[motivo] = motivos.get(motivo,0) + 1
+    for k,v in motivos.items():
+        print(f"  {k}: {v}")
+    # Métricas avanzadas
+    duraciones = [op.get('duracion_min',0) for op in log_operaciones]
+    print(f"Duración promedio operación: {sum(duraciones)/len(duraciones):.2f} min")
+    max_ganancia = max([op['ganancia_usdt'] for op in log_operaciones]) if log_operaciones else 0
+    max_perdida = min([op['ganancia_usdt'] for op in log_operaciones]) if log_operaciones else 0
+    print(f"Máxima ganancia: {max_ganancia:.2f} USDT | Máxima pérdida: {max_perdida:.2f} USDT")
+    # Análisis de factores
+    factores = {}
+    for op in log_operaciones:
+        for k,v in op.get('factores',{}).items():
+            if k not in factores:
+                factores[k] = []
+            factores[k].append(v)
+    print("Factores promedio de entrada:")
+    for k,vals in factores.items():
+        try:
+            avg = sum(vals)/len(vals)
+            print(f"  {k}: {avg:.4f}")
+        except:
+            pass
+    # Análisis de patrones detectados
+    patrones = {}
+    for op in log_operaciones:
+        patron = op.get('patron_detectado','')
+        if patron:
+            patrones[patron] = patrones.get(patron,0) + 1
+    if patrones:
+        print("Patrones detectados:")
+        for k,v in patrones.items():
+            print(f"  {k}: {v}")
+    print("===============================\n")
+    # Entrenamiento con Gemini AI
+    entrenar_con_gemini(log_path)
     if SHOW_PLOTS:
         plt.show()
 
 # --- Entrenamiento y predicción automática cada 30 minutos ---
+
 def ciclo_entrenamiento_30min():
     while True:
         print("[CICLO] Descargando histórico, entrenando IA y aplicando estrategia...")
